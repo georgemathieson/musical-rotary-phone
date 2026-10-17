@@ -53,7 +53,11 @@ parts in one solution:
 ```
 
 - `src/NetworkMonitor.Server` — listeners, protocol handlers, storage, hub, API, dashboard host.
-- `src/NetworkMonitor.Client` — the single-page dashboard.
+- `src/NetworkMonitor.Client` — the single-page dashboard. State is managed in a Redux-style
+  store (the [Blazor-State](https://github.com/TimeWarpEngineering/blazor-state) library, built on
+  MediatR): a single `ConnectionsState`, actions dispatched through the mediator, and handlers as
+  the reducers (see `State/`). History loads and row-detail fetches are async "effect" handlers;
+  live SignalR events are dispatched as actions so every UI change flows through the store.
 - `src/NetworkMonitor.Shared` — DTOs shared by both.
 - `tests/NetworkMonitor.Tests` — unit tests (hex dump, SSH wire format + crypto, limiter, mapping).
 
