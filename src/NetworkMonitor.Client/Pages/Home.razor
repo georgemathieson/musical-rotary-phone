@@ -1,0 +1,295 @@
+﻿@page "/"
+@implements IAsyncDisposable
+@inject HttpClient Http
+@inject NavigationManager Nav
+
+<PageTitle>Network Monitor</PageTitle>
+
+<header class="topbar">
+    <div class="brand">
+        <span class="logo">◉</span>
+        <div>
+            <h1>Network Monitor</h1>
+            <p class="subtitle">Connection honeypot &middot; listening on @(_portLabel)</p>
+        </div>
+    </div>
+    <div class="status">
+        <span class="dot @(_live ? "dot-on" : "dot-off")"></span>
+        <span>@(_live ? "Live" : "Disconnected")</span>
+        <span class="total">@_all.Count shown / @_total total</span>
+    </div>
+</header>
+
+<section class="stats">
+    @foreach (var stat in _portStats.OrderByDescending(s => s.Count))
+    {
+        <button class="chip @(_portFilter == stat.Port ? "chip-active" : "")"
+                @onclick="() => TogglePort(stat.Port)">
+            <span class="chip-port">@stat.Service</span>
+            <span class="chip-count">@stat.Count</span>
+        </button>
+    }
+</section>
+
+<section class="controls">
+    <input class="search" placeholder="Filter by IP…" @bind="_ipFilter" @bind:event="oninput" />
+    <input class="search" placeholder="Search summary / notes…" @bind="_textFilter" @bind:event="oninput" />
+    <label class="pause">
+        <input type="checkbox" @bind="_paused" /> Pause live updates
+    </label>
+    <button class="btn" @onclick="Reload">Reload</button>
+    @if (_portFilter is not null || !string.IsNullOrEmpty(_ipFilter) || !string.IsNullOrEmpty(_textFilter))
+    {
+        <button class="btn btn-clear" @onclick="ClearFilters">Clear filters</button>
+    }
+</section>
+
+<div class="layout">
+    <section class="table-wrap">
+        <table class="log">
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Service</th>
+                    <th>Port</th>
+                    <th>Source</th>
+                    <th>Summary</th>
+                    <th class="num">Bytes</th>
+                </tr>
+            </thead>
+            <tbody>
+                @if (!Filtered.Any())
+                {
+                    <tr><td colspan="6" class="empty">No connections captured yet. Waiting for traffic…</td></tr>
+                }
+                @foreach (var c in Filtered)
+                {
+                    <tr class="@(IsSelected(c) ? "row-selected" : "") @(c.Credentials.Count > 0 ? "row-cred" : "")"
+                        @onclick="() => Select(c)">
+                        <td class="mono">@c.StartedAt.LocalDateTime.ToString("HH:mm:ss")</td>
+                        <td><span class="svc svc-@c.Transport.ToLower()">@c.Service</span></td>
+                        <td class="mono">@c.Transport/@c.Port</td>
+                        <td class="mono">@c.RemoteIp:@c.RemotePort</td>
+                        <td class="summary">
+                            @if (c.Credentials.Count > 0)
+                            {
+                                <span class="key">🔑</span>
+                            }
+                            @c.Summary
+                        </td>
+                        <td class="num mono">@c.BytesReceived</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </section>
+
+    <aside class="detail @(_selected is null ? "detail-empty" : "")">
+        @if (_selected is { } d)
+        {
+            <div class="detail-head">
+                <h2>@d.Service <small>@d.Transport/@d.Port</small></h2>
+                <button class="btn-close" @onclick="() => _selected = null">✕</button>
+            </div>
+
+            <dl class="meta">
+                <dt>Source</dt><dd class="mono">@d.RemoteIp : @d.RemotePort</dd>
+                <dt>Started</dt><dd class="mono">@d.StartedAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss")</dd>
+                <dt>Duration</dt><dd class="mono">@d.DurationSeconds.ToString("0.00") s</dd>
+                <dt>Bytes in / out</dt><dd class="mono">@d.BytesReceived / @d.BytesSent</dd>
+            </dl>
+
+            @if (d.Credentials.Count > 0)
+            {
+                <h3>Credentials offered</h3>
+                <table class="creds">
+                    <thead><tr><th>Service</th><th>Username</th><th>Password</th><th>Method</th></tr></thead>
+                    <tbody>
+                        @foreach (var cred in d.Credentials)
+                        {
+                            <tr>
+                                <td>@cred.Service</td>
+                                <td class="mono">@(cred.Username ?? "—")</td>
+                                <td class="mono">@(cred.Password ?? "—")</td>
+                                <td>@cred.Detail</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+
+            @if (d.Notes.Count > 0)
+            {
+                <h3>Protocol transcript</h3>
+                <pre class="notes">@string.Join("\n", d.Notes)</pre>
+            }
+
+            @if (!string.IsNullOrEmpty(d.HexDump))
+            {
+                <h3>Raw bytes (hex)</h3>
+                <pre class="hex">@d.HexDump</pre>
+            }
+        }
+        else
+        {
+            <p class="hint">Select a connection to see everything the peer sent — the full transcript, any credentials tried, and a hex dump of the raw bytes.</p>
+        }
+    </aside>
+</div>
+
+@code {
+    private readonly List<ConnectionEventDto> _all = new();
+    private const int MaxRows = 2000;
+
+    private HubConnection? _hub;
+    private bool _live;
+    private bool _paused;
+    private long _total;
+
+    private int? _portFilter;
+    private string _ipFilter = "";
+    private string _textFilter = "";
+    private ConnectionEventDto? _selected;
+
+    private List<PortStat> _portStats = new();
+    private string _portLabel = "…";
+
+    private IEnumerable<ConnectionEventDto> Filtered =>
+        _all.Where(c =>
+            (_portFilter is null || c.Port == _portFilter) &&
+            (string.IsNullOrEmpty(_ipFilter) || c.RemoteIp.Contains(_ipFilter, StringComparison.OrdinalIgnoreCase)) &&
+            (string.IsNullOrEmpty(_textFilter) ||
+                c.Summary.Contains(_textFilter, StringComparison.OrdinalIgnoreCase) ||
+                c.Notes.Any(n => n.Contains(_textFilter, StringComparison.OrdinalIgnoreCase))));
+
+    private bool IsSelected(ConnectionEventDto c) =>
+        _selected is not null && (_selected.Id > 0 ? _selected.Id == c.Id : ReferenceEquals(_selected, c));
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadConfig();
+        await Reload();
+        await ConnectHub();
+    }
+
+    private async Task LoadConfig()
+    {
+        try
+        {
+            var config = await Http.GetFromJsonAsync<ConfigResponse>("api/config");
+            if (config is not null)
+            {
+                var ports = config.TcpPorts.Select(p => p.Port)
+                    .Concat(config.UdpPorts.Select(p => p.Port))
+                    .OrderBy(p => p);
+                _portLabel = string.Join(", ", ports);
+            }
+        }
+        catch { _portLabel = "(unavailable)"; }
+    }
+
+    private async Task Reload()
+    {
+        try
+        {
+            var rows = await Http.GetFromJsonAsync<List<ConnectionEventDto>>("api/connections?take=1000");
+            _all.Clear();
+            if (rows is not null)
+                _all.AddRange(rows);
+            await RefreshStats();
+        }
+        catch { /* server may still be starting */ }
+    }
+
+    private async Task RefreshStats()
+    {
+        try
+        {
+            var stats = await Http.GetFromJsonAsync<StatsResponse>("api/stats");
+            if (stats is not null)
+            {
+                _total = stats.Total;
+                _portStats = stats.Ports;
+            }
+        }
+        catch { }
+    }
+
+    private async Task ConnectHub()
+    {
+        _hub = new HubConnectionBuilder()
+            .WithUrl(Nav.ToAbsoluteUri(HubContract.Path))
+            .WithAutomaticReconnect()
+            .Build();
+
+        _hub.On<ConnectionEventDto>(HubContract.ConnectionRecorded, dto =>
+        {
+            if (_paused)
+                return;
+            _all.Insert(0, dto);
+            if (_all.Count > MaxRows)
+                _all.RemoveRange(MaxRows, _all.Count - MaxRows);
+            _total++;
+            BumpStat(dto);
+            InvokeAsync(StateHasChanged);
+        });
+
+        _hub.Reconnected += _ => { _live = true; return InvokeAsync(StateHasChanged); };
+        _hub.Closed += _ => { _live = false; return InvokeAsync(StateHasChanged); };
+
+        try
+        {
+            await _hub.StartAsync();
+            _live = true;
+        }
+        catch { _live = false; }
+    }
+
+    private void BumpStat(ConnectionEventDto dto)
+    {
+        PortStat? stat = _portStats.FirstOrDefault(s => s.Port == dto.Port);
+        if (stat is null)
+            _portStats.Add(new PortStat { Port = dto.Port, Service = dto.Service, Count = 1 });
+        else
+            stat.Count++;
+    }
+
+    private void Select(ConnectionEventDto c) => _selected = c;
+
+    private void TogglePort(int port)
+    {
+        _portFilter = _portFilter == port ? null : port;
+    }
+
+    private void ClearFilters()
+    {
+        _portFilter = null;
+        _ipFilter = "";
+        _textFilter = "";
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_hub is not null)
+            await _hub.DisposeAsync();
+    }
+
+    private sealed class ConfigResponse
+    {
+        public List<PortEntry> TcpPorts { get; set; } = new();
+        public List<PortEntry> UdpPorts { get; set; } = new();
+    }
+    private sealed class PortEntry { public int Port { get; set; } public string Service { get; set; } = ""; }
+
+    private sealed class StatsResponse
+    {
+        public long Total { get; set; }
+        public List<PortStat> Ports { get; set; } = new();
+    }
+    private sealed class PortStat
+    {
+        public int Port { get; set; }
+        public string Service { get; set; } = "";
+        public int Count { get; set; }
+    }
+}

@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/NetworkMonitor.Client/NetworkMonitor.Client.csproj" />
+    <Project Path="src/NetworkMonitor.Server/NetworkMonitor.Server.csproj" />
+    <Project Path="src/NetworkMonitor.Shared/NetworkMonitor.Shared.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/NetworkMonitor.Tests/NetworkMonitor.Tests.csproj" />
+  </Folder>
+</Solution>
