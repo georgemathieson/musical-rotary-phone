@@ -77,22 +77,76 @@ sudo dotnet run --project src/NetworkMonitor.Server -c Release
 
 `sudo` is needed because the default port list includes ports below 1024 (on Linux you can
 instead grant the capability: `setcap cap_net_bind_service=+ep` on the host, or just monitor
-high ports). Open **http://localhost:8099** for the dashboard.
+high ports). Open **http://localhost:8099** for the dashboard and sign in (see
+[Dashboard sign-in](#dashboard-sign-in)).
 
 ### With Docker
 
 ```bash
 docker build -t network-monitor .
 
+# One-off: create the password hash for the dashboard login.
+docker run --rm -it network-monitor hash-password
+
 # Map the dashboard and whichever honeypot ports you want reachable.
 docker run --rm \
   -p 8099:8099 \
   -p 22:22 -p 80:80 -p 443:443 -p 23:23 -p 21:21 -p 6379:6379 \
+  -e Dashboard__Username=admin \
+  -e Dashboard__PasswordHash='AQAAAAIAAYagAAAAE…' \
   -v "$PWD/data:/data" \
   network-monitor
 ```
 
-The SQLite database is written to the `/data` volume so logs survive restarts.
+The SQLite database (and the keys that sign login sessions) are written to the `/data` volume
+so logs and sign-ins survive restarts.
+
+## Dashboard sign-in
+
+The dashboard, its API (`/api/*`) and the live feed (`/hub/monitor`) all require signing in with a
+username and password; the honeypot ports are not affected. Everything is denied by default —
+the Blazor app files themselves are not served until you have signed in.
+
+**Set the login.** Only a salted PBKDF2 hash of the password is stored. Generate it with:
+
+```bash
+dotnet src/NetworkMonitor.Server/bin/Release/net10.0/NetworkMonitor.Server.dll hash-password
+#   or: dotnet run --project src/NetworkMonitor.Server -- hash-password
+#   or: docker run --rm -it network-monitor hash-password
+```
+
+It prompts without echoing (or reads one line from stdin) and prints the hash. Put it in
+`Dashboard:PasswordHash`, e.g. as the environment variable `Dashboard__PasswordHash`, and set
+`Dashboard:Username` (default `admin`). Passwords must be at least 12 characters.
+
+If no hash is configured, a random one-time password is generated at startup and written to the
+log as a warning, so the dashboard is never left open — but it changes on every restart.
+
+**What protects it**
+
+- Cookie session: `HttpOnly`, `SameSite=Strict`, `Secure` over HTTPS; expires after 8 hours idle.
+- Anti-forgery token on the sign-in form.
+- Sign-in attempts are rate-limited per IP (`Dashboard:LoginAttemptsPerMinute`, default 5), and
+  failed attempts are logged with the source IP.
+- `X-Frame-Options: DENY`, `nosniff`, `no-referrer`; API responses are `no-store` and the app is
+  revalidated on every load, so a signed-out browser can't reopen it from cache.
+- The sign-in always lands on the dashboard (no return URL), so it can't be used as an open
+  redirect.
+
+**Serve it over HTTPS.** Over plain HTTP the password and session cookie cross the network in
+clear text — the app logs a warning at startup if the dashboard is on plain HTTP and reachable
+off-box. Kestrel can terminate TLS itself; PEM files from Let's Encrypt work directly:
+
+```bash
+Dashboard__Url=https://0.0.0.0:8443 \
+Kestrel__Certificates__Default__Path=/etc/letsencrypt/live/example.com/fullchain.pem \
+Kestrel__Certificates__Default__KeyPath=/etc/letsencrypt/live/example.com/privkey.pem \
+dotnet NetworkMonitor.Server.dll
+```
+
+Alternatively put it behind a TLS reverse proxy (Caddy, nginx) and bind the dashboard to
+`http://127.0.0.1:8099`. Note the sign-in rate limit is per client IP, so behind a proxy it
+counts every user as the proxy's address unless forwarded headers are configured.
 
 ## The dashboard
 
@@ -108,11 +162,17 @@ Rows where a credential was captured are highlighted.
 
 ## Configuration
 
-Everything lives in `src/NetworkMonitor.Server/appsettings.json` under `Monitor`, and every key
-can be overridden with an environment variable (e.g. `Monitor__DatabasePath`,
-`Dashboard__Url`).
+Everything lives in `src/NetworkMonitor.Server/appsettings.json` under `Monitor` and
+`Dashboard`, and every key can be overridden with an environment variable (e.g.
+`Monitor__DatabasePath`, `Dashboard__Url`).
 
 ```jsonc
+"Dashboard": {
+  "Url": "http://0.0.0.0:8099",       // https://… with a Kestrel certificate for internet use
+  "Username": "admin",
+  "PasswordHash": "",                 // from `hash-password`; empty = one-time password per run
+  "LoginAttemptsPerMinute": 5         // per client IP
+},
 "Monitor": {
   "BindAddress": "0.0.0.0",
   "DatabasePath": "networkmonitor.db",
@@ -144,9 +204,10 @@ and per-IP / global connection caps protect the host from floods and from fillin
   take 22.
 - **Privileges.** Ports below 1024 need root (or `CAP_NET_BIND_SERVICE`) on Linux, or admin on
   Windows.
-- **The dashboard shows attacker data and your watched ports.** Put it behind a firewall,
-  VPN, or reverse proxy with authentication if the host is internet-facing. By default it binds
-  all interfaces on :8099 with no authentication.
+- **The dashboard shows attacker data and your watched ports.** It requires a sign-in, but
+  serve it over HTTPS before exposing it to the internet (see
+  [Dashboard sign-in](#dashboard-sign-in)), and keep the `/data` directory private: it holds
+  the captured data and the session-signing keys (stored unencrypted).
 - **Stealth scans are invisible by design.** A listener only sees connections that complete the
   TCP handshake, so a half-open scan (`nmap -sS`) never shows up. Catching those needs raw
   packet capture (root + libpcap) and is intentionally left out of this version; the capture

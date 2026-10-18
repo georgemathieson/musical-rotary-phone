@@ -45,6 +45,8 @@ h1, h2, h3 { margin: 0; font-weight: 600; }
 .subtitle { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
 .status { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; }
 .total { color: var(--text); font-family: var(--mono); }
+.signout { margin: 0 0 0 6px; }
+.signout .btn { padding: 5px 12px; font-size: 12px; }
 .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
 .dot-on { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
 .dot-off { background: var(--cred); }

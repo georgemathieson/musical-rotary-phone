@@ -4,10 +4,11 @@ obj/
 publish/
 *.user
 
-# SQLite databases produced at runtime
+# SQLite databases and session signing keys produced at runtime
 *.db
 *.db-shm
 *.db-wal
+keys/
 
 # IDE
 .vs/

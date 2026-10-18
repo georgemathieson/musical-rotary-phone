@@ -17,6 +17,9 @@
         <span class="dot @(State.Live ? "dot-on" : "dot-off")"></span>
         <span>@(State.Live ? "Live" : "Disconnected")</span>
         <span class="total">@State.Rows.Count shown / @State.Total total</span>
+        <form method="post" action="logout" class="signout">
+            <button type="submit" class="btn btn-clear">Sign out</button>
+        </form>
     </div>
 </header>
 
@@ -176,6 +179,10 @@
         {
             await _hub.StartAsync();
             await Dispatch(new ConnectionsState.SetLiveAction { Live = true });
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+        {
+            Nav.NavigateTo("login", forceLoad: true);
         }
         catch { await Dispatch(new ConnectionsState.SetLiveAction { Live = false }); }
     }
