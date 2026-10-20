@@ -71,13 +71,20 @@ which is then recorded and refused.
 ### With the .NET SDK (.NET 10)
 
 ```bash
-# Dashboard on http://localhost:8099 ; listeners on the configured ports.
-sudo dotnet run --project src/NetworkMonitor.Server -c Release
+# macOS: no sudo needed. macOS lets normal users listen on ports below 1024.
+dotnet run --project src/NetworkMonitor.Server -c Release
+
+# Linux: ports below 1024 need root. Build as yourself, then run only the built app as root.
+dotnet publish src/NetworkMonitor.Server -c Release -o out
+sudo "$(command -v dotnet)" out/NetworkMonitor.Server.dll
 ```
 
-`sudo` is needed because the default port list includes ports below 1024 (on Linux you can
-instead grant the capability: `setcap cap_net_bind_service=+ep` on the host, or just monitor
-high ports). Open **http://localhost:8099** for the dashboard and sign in (see
+Don't run the SDK itself (`dotnet run`, `dotnet build`) under `sudo`: it writes root-owned files
+into your home directory that break later builds. On Linux you can also avoid root entirely with
+Docker (below) or by only monitoring ports 1024 and up. Ports already used by the machine (e.g.
+22 with macOS Remote Login on, 445 with File Sharing) are skipped with an error in the log.
+
+Open **http://localhost:8099** for the dashboard and sign in (see
 [Dashboard sign-in](#dashboard-sign-in)).
 
 ### With Docker
@@ -214,3 +221,25 @@ and per-IP / global connection caps protect the host from floods and from fillin
   layer is pluggable so it can be added later.
 - **UDP has no handshake**, so sources are trivially spoofable; treat UDP source IPs with
   suspicion.
+
+## Troubleshooting
+
+**Every `dotnet` command fails with `System.IO.IOException: The system cannot open the device or
+file specified. : 'NuGet-Migrations'`** (macOS, .NET 10.0.13 or later; the message ends with
+`lstat("", ...) == -1; errno == ENOENT`). Since that security release, .NET keeps named-mutex files
+in a per-user folder, which on macOS is `$TMPDIR`. If `TMPDIR` is *set but empty* in your shell,
+.NET uses an empty path and fails before doing anything else. Check and fix it:
+
+```bash
+printf 'TMPDIR=[%s]\n' "$TMPDIR"                 # "TMPDIR=[]" means set but empty
+export TMPDIR="$(getconf DARWIN_USER_TEMP_DIR)"  # fixes the current terminal
+```
+
+Then find the line in your shell startup files that empties it, and remove it:
+
+```bash
+grep -n TMPDIR ~/.zshenv ~/.zprofile ~/.zshrc ~/.bash_profile ~/.bashrc ~/.profile 2>/dev/null
+```
+
+If you previously ran `dotnet` with `sudo`, also hand back anything it created as root:
+`sudo chown -R "$(id -un)" ~/.dotnet ~/.nuget ~/.local/share/NuGet 2>/dev/null`.
